@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/Dowtai/pr-reviewer-service/internal/api"
@@ -12,7 +13,7 @@ import (
 	"github.com/Dowtai/pr-reviewer-service/internal/service"
 )
 
-func NewServer() *http.Server {
+func NewServer(port string) *http.Server {
 	repo := memory_repo.NewMemoryRepo()
 
 	svc := service.NewService(repo)
@@ -26,9 +27,11 @@ func NewServer() *http.Server {
 	mux.HandleFunc("/pullRequest/reassign", api.PullRequestReassignHandler(svc))
 	mux.HandleFunc("/users/getReview", api.UsersGetReviewHandler(svc))
 
-	port := ":8080"
+	if port == "" {
+		port = "8080"
+	}
 	server := &http.Server{
-		Addr:    port,
+		Addr:    ":" + port,
 		Handler: mux,
 	}
 	return server
@@ -43,7 +46,7 @@ func ShutdownServer(server *http.Server) {
 }
 
 func main() {
-	server := NewServer()
+	server := NewServer(os.Getenv("PORT"))
 	log.Println("Server started on port", server.Addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)

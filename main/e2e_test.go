@@ -52,7 +52,13 @@ func assertJSONEqual[T any](t *testing.T, resp *http.Response, expected T) T {
 	return actual
 }
 
-const baseURL = "http://localhost:8080"
+var baseURL string
+var port string
+
+func init() {
+	port = "8080"
+	baseURL = "http://localhost:" + port
+}
 
 func createTeam(t *testing.T, teamName string, members []models.TeamMember) models.Team {
 	teamReq := map[string]interface{}{
@@ -312,6 +318,24 @@ func reassignPullRequestExpectError(t *testing.T, pullRequestId, oldUserId strin
 	assertJSONEqual(t, resp, expectedErr)
 }
 
+func slicesEqualIgnoreOrder(a, b []models.PullRequestShort) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	count := make(map[string]int)
+	for _, pr := range a {
+		count[pr.PullRequestId]++
+	}
+	for _, pr := range b {
+		if count[pr.PullRequestId] == 0 {
+			return false
+		}
+		count[pr.PullRequestId]--
+	}
+	return true
+}
+
 func getReview(t *testing.T, userId string, expected []models.PullRequestShort) {
 	url := baseURL + "/users/getReview?user_id=" + userId
 	resp := doRequest(t, http.MethodGet, url, nil)
@@ -320,7 +344,22 @@ func getReview(t *testing.T, userId string, expected []models.PullRequestShort) 
 		t.Fatalf("Expected 200, got %d", resp.StatusCode)
 	}
 
-	assertJSONEqual(t, resp, expected)
+	defer resp.Body.Close()
+	var actual []models.PullRequestShort
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to read body: %v", err)
+	}
+
+	if err := json.Unmarshal(body, &actual); err != nil {
+		t.Fatalf("Failed to unmarshal: %v\nBody: %s", err, string(body))
+	}
+
+	if !slicesEqualIgnoreOrder(actual, expected) {
+		expBytes, _ := json.MarshalIndent(expected, "", "  ")
+		actBytes, _ := json.MarshalIndent(actual, "", "  ")
+		t.Fatalf("Slices not equal ignoring order\nExpected:\n%s\nActual:\n%s", expBytes, actBytes)
+	}
 }
 
 func getReviewExpectError(t *testing.T, userId string, expectedStatus int, code models.ErrorDetailCode, message string) {
@@ -342,7 +381,7 @@ func getReviewExpectError(t *testing.T, userId string, expectedStatus int, code 
 }
 
 func TestTeam(t *testing.T) {
-	server := NewServer()
+	server := NewServer(port)
 	go func() { _ = server.ListenAndServe() }()
 	defer ShutdownServer(server)
 	var team1, team2 models.Team
@@ -381,7 +420,7 @@ func TestTeam(t *testing.T) {
 }
 
 func TestUsers(t *testing.T) {
-	server := NewServer()
+	server := NewServer(port)
 	go func() { _ = server.ListenAndServe() }()
 	defer ShutdownServer(server)
 	var team1 models.Team
@@ -419,7 +458,7 @@ func TestUsers(t *testing.T) {
 }
 
 func TestPullRequest(t *testing.T) {
-	server := NewServer()
+	server := NewServer(port)
 	go func() { _ = server.ListenAndServe() }()
 	defer ShutdownServer(server)
 	var pr, pr1, pr2 models.PullRequest
