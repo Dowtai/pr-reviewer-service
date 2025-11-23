@@ -16,6 +16,7 @@ const (
 
 type ErrorService struct {
 	Code    int
+	ApiCode models.ErrorDetailCode
 	Message string
 }
 
@@ -26,6 +27,15 @@ func (e ErrorService) Error() string {
 func NewErrorService(code int, message string) ErrorService {
 	return ErrorService{
 		Code:    code,
+		ApiCode: "",
+		Message: message,
+	}
+}
+
+func NewErrorApi(code int, apiCode models.ErrorDetailCode, message string) ErrorService {
+	return ErrorService{
+		Code:    code,
+		ApiCode: apiCode,
 		Message: message,
 	}
 }
@@ -34,9 +44,15 @@ type PrReviewerService struct {
 	repo repo.Repo
 }
 
+func NewService(repo repo.Repo) *PrReviewerService {
+	return &PrReviewerService{
+		repo: repo,
+	}
+}
+
 func (s *PrReviewerService) TeamAdd(team models.Team) (models.Team, error) {
 	if s.repo.TeamExists(team.TeamName) {
-		return team, NewErrorService(OBJECT_EXISTS, "Team already exists")
+		return team, NewErrorApi(OBJECT_EXISTS, models.TEAM_EXISTS, "Team already exists")
 	}
 
 	var err error
@@ -46,7 +62,7 @@ func (s *PrReviewerService) TeamAdd(team models.Team) (models.Team, error) {
 			user.TeamName = team.TeamName
 			user.IsActive = member.IsActive
 
-			err = s.repo.UpdateUser(*user)
+			err = s.repo.UpdateUser(user)
 		} else {
 			newUser := models.NewUser(member.UserId, member.Username, team.TeamName, member.IsActive)
 			err = s.repo.CreateUser(newUser)
@@ -66,16 +82,21 @@ func (s *PrReviewerService) TeamAdd(team models.Team) (models.Team, error) {
 	return team, nil
 }
 
-func (s *PrReviewerService) TeamGet(team models.Team) (models.Team, error) {
-	if t := s.repo.GetTeamByName(team.TeamName); t != nil {
+func (s *PrReviewerService) TeamGet(teamName string) (models.Team, error) {
+	if t := s.repo.GetTeamByName(teamName); t != nil {
 		return *t, nil
 	}
 
-	return team, NewErrorService(OBJECT_NOT_FOUND, "Team not found")
+	return models.Team{}, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "Team not found")
 }
 
 func (s *PrReviewerService) UsersSetIsActive(userId string, isActive bool) (models.User, error) {
-	if user := s.repo.SetIsActiveUser(userId, isActive); user != nil {
+	if user := s.repo.GetUserById(userId); user != nil {
+		user.IsActive = isActive
+		err := s.repo.UpdateUser(user)
+		if err != nil {
+			return *user, NewErrorService(INTERNAL_ERROR, err.Error())
+		}
 		return *user, nil
 	}
 	return models.User{}, NewErrorService(OBJECT_NOT_FOUND, "User not found")
@@ -83,12 +104,16 @@ func (s *PrReviewerService) UsersSetIsActive(userId string, isActive bool) (mode
 
 func (s *PrReviewerService) PullRequestCreate(pullRequestId, pullRequestName, authorId string) (models.PullRequest, error) {
 	if pr := s.repo.GetPullRequestById(pullRequestId); pr != nil {
-		return *pr, NewErrorService(DOMAIN_ERROR, "Pull request already exists")
+		return *pr, NewErrorApi(DOMAIN_ERROR, models.PR_EXISTS, "Pull request already exists")
 	}
 
-	team := s.repo.GetTeamByUserId(authorId)
+	user := s.repo.GetUserById(authorId)
+	if user == nil {
+		return models.PullRequest{}, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "Author not found")
+	}
+	team := s.repo.GetTeamByName(user.TeamName)
 	if team == nil {
-		return models.PullRequest{}, NewErrorService(OBJECT_NOT_FOUND, "Team not found")
+		return models.PullRequest{}, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "Team not found")
 	}
 
 	reviewers := make([]string, 0, 2)
@@ -122,19 +147,22 @@ func (s *PrReviewerService) PullRequestMerge(pullRequestId string) (models.PullR
 			pr.Status = models.MERGED
 			pr.MergedAt = &now
 		}
+		if err := s.repo.UpdatePR(pr); err != nil {
+			return *pr, NewErrorService(INTERNAL_ERROR, err.Error())
+		}
 		return *pr, nil
 	}
 
-	return models.PullRequest{}, NewErrorService(OBJECT_NOT_FOUND, "Pull request not found")
+	return models.PullRequest{}, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "Pull request not found")
 }
 
 func (s *PrReviewerService) PullRequestReassign(pullRequestId, oldUserId string) (models.PullRequest, string, error) {
 	pr, user := s.repo.GetPullRequestById(pullRequestId), s.repo.GetUserById(oldUserId)
 	if pr == nil || user == nil {
-		return models.PullRequest{}, "", NewErrorService(OBJECT_NOT_FOUND, "Pull request or user not found")
+		return models.PullRequest{}, "", NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "Pull request or user not found")
 	}
 	if pr.Status == models.MERGED {
-		return *pr, "", NewErrorService(DOMAIN_ERROR, "Cannot reassign on merged PR")
+		return *pr, "", NewErrorApi(DOMAIN_ERROR, models.PR_MERGED, "cannot reassign on merged PR")
 	}
 
 	for i, reviewer := range pr.AssignedReviewers {
@@ -154,21 +182,32 @@ func (s *PrReviewerService) PullRequestReassign(pullRequestId, oldUserId string)
 					}
 					if !collision {
 						pr.AssignedReviewers[i] = candidate.UserId
+
+						err := s.repo.UpdatePR(pr)
+						if err != nil {
+							return *pr, candidate.UserId, NewErrorService(INTERNAL_ERROR, err.Error())
+						}
+
+						err = s.repo.AddPRToUser(candidate.UserId, pullRequestId)
+						if err != nil {
+							return *pr, candidate.UserId, NewErrorService(INTERNAL_ERROR, err.Error())
+						}
+
 						return *pr, candidate.UserId, nil
 					}
 				}
 			}
-			break
+			return *pr, "", NewErrorApi(DOMAIN_ERROR, models.NO_CANDIDATE, "no active replacement candidate in team")
 		}
 	}
 
-	return *pr, "", NewErrorService(DOMAIN_ERROR, "reviewer is not assigned to this PR")
+	return *pr, "", NewErrorApi(DOMAIN_ERROR, models.NOT_ASSIGNED, "reviewer is not assigned to this PR")
 }
 
 func (s *PrReviewerService) UsersGetReview(userId string) ([]models.PullRequestShort, error) {
 	prs := s.repo.GetPullRequestsByUserId(userId)
 	if prs == nil {
-		return nil, NewErrorService(OBJECT_NOT_FOUND, "User not found")
+		return nil, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "User not found")
 	}
 
 	prsShort := make([]models.PullRequestShort, 0, len(prs))
