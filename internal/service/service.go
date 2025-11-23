@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/Dowtai/pr-reviewer-service/internal/models"
@@ -58,11 +59,7 @@ func (s *PrReviewerService) TeamAdd(team models.Team) (models.Team, error) {
 	var err error
 	for _, member := range team.Members {
 		if user := s.repo.GetUserById(member.UserId); user != nil {
-			user.Username = member.Username
-			user.TeamName = team.TeamName
-			user.IsActive = member.IsActive
-
-			err = s.repo.UpdateUser(user)
+			return team, NewErrorService(INTERNAL_ERROR, "user already exists")
 		} else {
 			newUser := models.NewUser(member.UserId, member.Username, team.TeamName, member.IsActive)
 			err = s.repo.CreateUser(newUser)
@@ -97,9 +94,17 @@ func (s *PrReviewerService) UsersSetIsActive(userId string, isActive bool) (mode
 		if err != nil {
 			return *user, NewErrorService(INTERNAL_ERROR, err.Error())
 		}
+		team := s.repo.GetTeamByName(user.TeamName)
+		if team == nil {
+			return *user, NewErrorApi(INTERNAL_ERROR, models.FATAL_ERROR, "Team not found")
+		}
+		err = s.repo.UpdateTeamMember(team, user)
+		if err != nil {
+			return *user, NewErrorService(INTERNAL_ERROR, err.Error())
+		}
 		return *user, nil
 	}
-	return models.User{}, NewErrorService(OBJECT_NOT_FOUND, "User not found")
+	return models.User{}, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "User not found")
 }
 
 func (s *PrReviewerService) PullRequestCreate(pullRequestId, pullRequestName, authorId string) (models.PullRequest, error) {
@@ -109,11 +114,11 @@ func (s *PrReviewerService) PullRequestCreate(pullRequestId, pullRequestName, au
 
 	user := s.repo.GetUserById(authorId)
 	if user == nil {
-		return models.PullRequest{}, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "Author not found")
+		return models.PullRequest{}, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "author not found")
 	}
 	team := s.repo.GetTeamByName(user.TeamName)
 	if team == nil {
-		return models.PullRequest{}, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "Team not found")
+		return models.PullRequest{}, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "team not found")
 	}
 
 	reviewers := make([]string, 0, 2)
@@ -123,7 +128,7 @@ func (s *PrReviewerService) PullRequestCreate(pullRequestId, pullRequestName, au
 			continue
 		}
 		if member.IsActive {
-			reviewers = append(reviewers, member.Username)
+			reviewers = append(reviewers, member.UserId)
 		}
 		if len(reviewers) == 2 {
 			break
@@ -135,6 +140,14 @@ func (s *PrReviewerService) PullRequestCreate(pullRequestId, pullRequestName, au
 
 	if err := s.repo.CreatePR(pr); err != nil {
 		return pr, NewErrorService(INTERNAL_ERROR, err.Error())
+	}
+
+	for _, reviewer := range reviewers {
+		err := s.repo.AddPRToUser(reviewer, pullRequestId)
+		if err != nil {
+			fmt.Println(err.Error(), reviewer)
+			return models.PullRequest{}, NewErrorService(INTERNAL_ERROR, err.Error())
+		}
 	}
 
 	return pr, nil
@@ -169,7 +182,7 @@ func (s *PrReviewerService) PullRequestReassign(pullRequestId, oldUserId string)
 		if reviewer == oldUserId {
 			team := s.repo.GetTeamByName(user.TeamName)
 			for _, candidate := range team.Members {
-				if candidate.UserId != reviewer && candidate.IsActive {
+				if candidate.UserId != pr.AuthorId && candidate.UserId != reviewer && candidate.IsActive {
 					// I see 2 solutions here: hash map or just for iterating
 					// number of reviewers of PR - only 2
 					// I can hardcode with ifs, but I think code with simple extension will be better
@@ -193,6 +206,11 @@ func (s *PrReviewerService) PullRequestReassign(pullRequestId, oldUserId string)
 							return *pr, candidate.UserId, NewErrorService(INTERNAL_ERROR, err.Error())
 						}
 
+						err = s.repo.RemovePRFromUser(oldUserId, pullRequestId)
+						if err != nil {
+							return *pr, candidate.UserId, NewErrorService(INTERNAL_ERROR, err.Error())
+						}
+
 						return *pr, candidate.UserId, nil
 					}
 				}
@@ -205,10 +223,15 @@ func (s *PrReviewerService) PullRequestReassign(pullRequestId, oldUserId string)
 }
 
 func (s *PrReviewerService) UsersGetReview(userId string) ([]models.PullRequestShort, error) {
+	if user := s.repo.GetUserById(userId); user == nil {
+		return nil, NewErrorApi(404, models.NOT_FOUND, "user not found")
+	}
+
 	prs := s.repo.GetPullRequestsByUserId(userId)
 	if prs == nil {
-		return nil, NewErrorApi(OBJECT_NOT_FOUND, models.NOT_FOUND, "User not found")
+		return make([]models.PullRequestShort, 0), nil
 	}
+	fmt.Println(userId, prs)
 
 	prsShort := make([]models.PullRequestShort, 0, len(prs))
 	for _, pr := range prs {

@@ -77,6 +77,14 @@ func NewUser(userId string, username string, teamName string, isActive bool) Use
 	}
 }
 
+func NewTeamMember(user *User) TeamMember {
+	return TeamMember{
+		UserId:   user.UserId,
+		Username: user.Username,
+		IsActive: user.IsActive,
+	}
+}
+
 func NewPR(pullRequestId, pullRequestName, authorId string, status PullRequestStatus, assignedReviewers []string, createdAt *time.Time) PullRequest {
 	return PullRequest{
 		PullRequestId:     pullRequestId,

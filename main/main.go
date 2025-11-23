@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/Dowtai/pr-reviewer-service/internal/api"
 	"github.com/Dowtai/pr-reviewer-service/internal/repo/memory_repo"
 	"github.com/Dowtai/pr-reviewer-service/internal/service"
 )
 
-func main() {
+func NewServer() *http.Server {
 	repo := memory_repo.NewMemoryRepo()
 
 	svc := service.NewService(repo)
@@ -24,8 +27,25 @@ func main() {
 	mux.HandleFunc("/users/getReview", api.UsersGetReviewHandler(svc))
 
 	port := ":8080"
-	log.Println("Server started on port", port)
-	if err := http.ListenAndServe(port, mux); err != nil {
+	server := &http.Server{
+		Addr:    port,
+		Handler: mux,
+	}
+	return server
+}
+
+func ShutdownServer(server *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("Error shutting down server: %v", err)
+	}
+}
+
+func main() {
+	server := NewServer()
+	log.Println("Server started on port", server.Addr)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
